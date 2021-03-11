@@ -30,13 +30,14 @@ import (
 	"gotest.tools/assert"
 )
 
-const testTemplate = "Follow the {{.color}} {{.animalType}}"
-const testTemplateWithEnvVar = "Follow the {{.color}} {{ .Env.ANIMAL }}"
+const testTemplate = `{"msg": "Follow the {{.color}} {{.animalType}}"}`
+const testTemplateWithDependency = `{"msg": "Follow the {{.color}} {{.animalType}} with {{ .dep }}"}`
+const testTemplateWithEnvVar = `{"msg": "Follow the {{.color}} {{ .Env.ANIMAL }}"}`
 
 var testDevEnvironment = environment.NewEnvironment("development", "Dev", "", "https://url/to/dev/environment", "DEV")
 var testHardeningEnvironment = environment.NewEnvironment("hardening", "Hardening", "", "https://url/to/hardening/environment", "HARDENING")
 var testProductionEnvironment = environment.NewEnvironment("prod-environment", "prod-environment", "production", "https://url/to/production/environment", "PRODUCTION")
-var testManagementZoneApi = api.NewApi("management-zone", "/api/config/v1/managementZones")
+var testManagementZoneApi = api.NewStandardApi("management-zone", "/api/config/v1/managementZones")
 
 func createConfigForTest(id string, project string, template util.Template, properties map[string]map[string]string, api api.Api, fileName string) configImpl {
 	return configImpl{
@@ -153,7 +154,7 @@ func TestGetConfigStringWithEnvironmentOverride(t *testing.T) {
 
 	devResult, err := config.GetConfigForEnvironment(testDevEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the black squid", devResult)
+	assert.Equal(t, "Follow the black squid", devResult["msg"])
 }
 
 func TestGetConfigStringNoEnvironmentOverride(t *testing.T) {
@@ -164,7 +165,7 @@ func TestGetConfigStringNoEnvironmentOverride(t *testing.T) {
 
 	hardeningResult, err := config.GetConfigForEnvironment(testHardeningEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the white rabbit", hardeningResult)
+	assert.Equal(t, "Follow the white rabbit", hardeningResult["msg"])
 }
 
 func TestGetConfigString(t *testing.T) {
@@ -178,8 +179,8 @@ func TestGetConfigString(t *testing.T) {
 
 	assert.NilError(t, devErr)
 	assert.NilError(t, hardeningErr)
-	assert.Equal(t, "Follow the black squid", devResult)
-	assert.Equal(t, "Follow the white rabbit", hardeningResult)
+	assert.Equal(t, "Follow the black squid", devResult["msg"])
+	assert.Equal(t, "Follow the white rabbit", hardeningResult["msg"])
 }
 
 // test GetConfigForEnvironment if environment group is defined
@@ -192,21 +193,50 @@ func TestGetConfigWithGroupOverride(t *testing.T) {
 
 	productionResult, err := config.GetConfigForEnvironment(testProductionEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the brown dog", productionResult)
+	assert.Equal(t, "Follow the brown dog", productionResult["msg"])
 }
 
-// testing the order when both group and environment overrides are defined
-// GetConfigForEnvironment should return environment values, as they are
-// overriding group values of getTestPropertiesWithGroupAndEnvironment
-func TestGetConfigWithGroupAndEnvironmentOverride(t *testing.T) {
+// test GetConfigForEnvironment if environment group is defined
+// it should return `test.production` group values of getTestProperties
+func TestGetConfigWithGroupOverrideAndDependency(t *testing.T) {
 
-	m := getTestPropertiesWithGroupAndEnvironment()
+	m := getTestProperties()
 	templ := getTestTemplate(t)
 	config := newConfig("test", "testproject", templ, m, testManagementZoneApi, "")
 
 	productionResult, err := config.GetConfigForEnvironment(testProductionEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the red cat", productionResult)
+	assert.Equal(t, "Follow the brown dog", productionResult["msg"])
+}
+
+// Testing dependencies resolution within group and env overrides
+func TestGetConfigWithGroupAndEnvironmentOverride(t *testing.T) {
+
+	managementZonePath := util.ReplacePathSeparators("infrastructure/management-zone/zone")
+
+	dynatraceEntity := api.DynatraceEntity{
+		Description: "bla",
+		Name:        "Test Management Zone",
+		Id:          managementZonePath,
+	}
+
+	dict := make(map[string]api.DynatraceEntity)
+	dict[managementZonePath] = dynatraceEntity
+
+	m := getTestPropertiesWithGroupAndEnvironment()
+	m["test.production"]["dep"] = "infrastructure/management-zone/zone.name"
+	templ := getTestTemplateWithDependency(t)
+	config := newConfig("test", "testproject", templ, m, testManagementZoneApi, "")
+
+	productionResult, err := config.GetConfigForEnvironment(testProductionEnvironment, dict)
+	assert.NilError(t, err)
+	assert.Equal(t, "Follow the red cat with Test Management Zone", productionResult["msg"])
+
+	m["test.prod-environment"]["dep2"] = "infrastructure/management-zone/zone.name"
+	config = newConfig("test", "testproject", templ, m, testManagementZoneApi, "")
+	productionResult, err = config.GetConfigForEnvironment(testProductionEnvironment, dict)
+	assert.NilError(t, err)
+	assert.Equal(t, "Follow the red cat with Test Management Zone", productionResult["msg"])
 }
 
 // Test combining parameters
@@ -222,14 +252,14 @@ func TestGetConfigWithMergingGroupAndEnvironmentOverrides(t *testing.T) {
 	delete(m["test.prod-environment"], "color")
 	productionResult, err := config.GetConfigForEnvironment(testProductionEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the brown cat", productionResult)
+	assert.Equal(t, "Follow the brown cat", productionResult["msg"])
 
 	// removing whole `test.prod-environment` config section
 	// only `test.production` parameters should be considered
 	delete(m, "test.prod-environment")
 	productionResult, err = config.GetConfigForEnvironment(testProductionEnvironment, make(map[string]api.DynatraceEntity))
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the brown dog", productionResult)
+	assert.Equal(t, "Follow the brown dog", productionResult["msg"])
 }
 
 func TestSkipConfigDeployment(t *testing.T) {
@@ -296,6 +326,12 @@ func TestGetObjectNameForEnvironment(t *testing.T) {
 
 func getTestTemplate(t *testing.T) util.Template {
 	template, e := util.NewTemplateFromString("test", testTemplate)
+	assert.NilError(t, e)
+	return template
+}
+
+func getTestTemplateWithDependency(t *testing.T) util.Template {
+	template, e := util.NewTemplateFromString("test", testTemplateWithDependency)
 	assert.NilError(t, e)
 	return template
 }
@@ -478,7 +514,7 @@ func TestGetConfigStringWithEnvVar(t *testing.T) {
 	util.UnsetEnv(t, "ANIMAL")
 
 	assert.NilError(t, err)
-	assert.Equal(t, "Follow the black cow", devResult)
+	assert.Equal(t, "Follow the black cow", devResult["msg"])
 }
 
 func TestGetConfigStringWithEnvVarLeadsToErrorIfEnvVarNotPresent(t *testing.T) {
